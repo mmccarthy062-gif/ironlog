@@ -71,9 +71,14 @@ label.f{display:block;font-size:11px;letter-spacing:.08em;text-transform:upperca
 a{color:inherit}
 .gline{stroke-width:2;fill:none}
 .tiny{font-size:11.5px}
-.pill{border:1px solid var(--line);border-radius:999px;padding:4px 10px;font-size:11.5px;
+.pill{border:1px solid var(--line);border-radius:999px;padding:5px 11px;font-size:11.5px;
   font-family:var(--mono);color:var(--dim);background:transparent;cursor:pointer}
 .pill.on{background:var(--panel2);color:var(--text)}
+.gympill{border:1px solid var(--green);color:var(--green);border-radius:999px;
+  padding:4px 11px;font-size:11.5px;font-family:var(--mono);background:transparent;cursor:pointer}
+.swapitem{display:block;width:100%;text-align:left;background:var(--panel2);border:1px solid var(--line);
+  border-radius:8px;padding:9px 11px;margin-top:6px;color:var(--text);font-size:13px;cursor:pointer}
+.swapitem.cur{border-color:var(--green)}
 hr{border:none;border-top:1px solid var(--line);margin:14px 0}
 </style>
 </head>
@@ -103,118 +108,226 @@ hr{border:none;border-top:1px solid var(--line);margin:14px 0}
 
 <script>
 /* ============================================================
-   IRON LOG — offline-first training logger
-   One file. No build step. No backend. Data in localStorage.
+   IRON LOG v2 — offline training logger, two gyms
+   Slot based: each programme row is a slot that resolves to a
+   different machine depending on which gym you are in.
    ============================================================ */
-const KEY = "ironlog.v1";
-const uid = (p) => p + Math.random().toString(36).slice(2, 8);
+const KEY = "ironlog.v1";              // storage key unchanged, do not rename
+const BACKUP_KEY = "ironlog.backup.pre-v2";
+const uid = p => p + Math.random().toString(36).slice(2,8);
 const now = () => Date.now();
 const todayISO = () => new Date(new Date().getTime() - new Date().getTimezoneOffset()*60000)
   .toISOString().slice(0,10);
-const esc = (s) => String(s==null?"":s).replace(/[&<>"]/g, c =>
-  ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
-const fmtT = (s) => Math.floor(s/60)+":"+String(Math.max(0,s%60)).padStart(2,"0");
-const fmtD = (iso) => { if(!iso) return ""; const [y,m,d]=iso.split("-");
+const esc = s => String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
+const fmtT = s => Math.floor(s/60)+":"+String(Math.max(0,s%60)).padStart(2,"0");
+const fmtD = iso => { if(!iso) return ""; const [y,m,d]=iso.split("-");
   return new Date(+y,+m-1,+d).toLocaleDateString("en-GB",{day:"numeric",month:"short"}); };
-const e1rm = (w,r) => (!w||!r) ? 0 : Math.round(w*(1+r/30)*10)/10;
+const e1rm = (w,r) => (!w||!r)?0:Math.round(w*(1+r/30)*10)/10;
+
+/* ---------- gyms ---------- */
+const GYMS = { leisure:{name:"Leisure Centre"}, office:{name:"Office"} };
+const gymName = g => (DB.gyms&&DB.gyms[g]&&DB.gyms[g].name) || (GYMS[g]&&GYMS[g].name) || g;
 
 /* ---------- technique notes ---------- */
 const TECH = {
   bigthree:"This is the lift the session is built around. Short on time, do this block and the first superset and walk out.",
   rampup:"The 5 minute warm up covers the ramp up: easy cardio, then two progressively heavier sets of this lift. Ramp up sets are not logged.",
-  racksafety:"Set the safety bars in the rack just below your bottom position so you can dump the bar if a rep stalls.",
+  racksafety:"Set the safety arms in the rack just below your bottom position so you can dump the bar if a rep stalls.",
   dlfloor:"Off the floor with the bumper plates. If your lower back rounds before the bar moves, pull from the rack pins at knee height.",
-  benchsafe:"Flat bench inside the rack with the pins just above chest height, or the Smith machine bench if the rack is taken.",
+  benchsafe:"Flat bench inside the rack with the safety arms just above chest height, or use the chest press machine if the rack is busy.",
   straight:"No rest between these two. Finish the first and go straight into the second. Rest only at the end of the pair.",
   drop2:"Drop set on the final set only: hit the reps, drop about 15 percent and repeat, then drop another 15 percent and go again.",
   restpause:"F means to failure. At failure, hold the top position for 20 seconds, then go again to failure.",
-  busy:"If a machine is taken, use the substitute on the card rather than waiting. Waiting is what pushes a session past 40 minutes."
+  busy:"If a machine is taken, hit swap on the card and pick the alternative rather than waiting."
 };
 
-/* ---------- default exercise library ---------- */
+/* ---------- exercise library ---------- */
+/* [name, cue, kit, alt] */
 const EXD = {
   dl:["Deadlift","Bar over mid foot, shins close, flat back, shoulders just in front of the bar. Drive through the heels and push the hips through. Reset on the floor between reps.","Rack area, Olympic bar and bumper plates","Rack pull from knee height"],
-  sq:["Back squat","Bar on the rear delts, out of the rack at mid chest. Feet just outside shoulder width, down to at least parallel, drive up through the heels.","Power rack, bar and plates","Linear leg press"],
-  bp:["Bench press","Shoulder blades pinned back and down, feet flat. Lower to the lower chest, elbows about 45 degrees, press without locking out.","Flat bench in the rack, or the Smith bench","Chest press machine"],
-  chin:["Assisted chin up","Palms facing you, shoulder width. Set the assist so the last rep is hard but clean. Chin over the bar, slow down.","Assist Chin machine, or the rack pull up bar","Close neutral grip pulldown"],
-  row:["Seated row machine","Chest on the pad, neutral grip. Pull to the ribs leading with the elbows, squeeze the blades, control back.","Life Fitness Row","Low cable row"],
-  lpd:["Lat pulldown","Overhand, just wider than shoulders. Pull to the upper chest, elbows down and back, no leaning away.","Life Fitness Pulldown","Assist Chin machine"],
-  bcm:["Biceps curl machine","Upper arms flat on the pad. Curl and squeeze, lower all the way under control.","Life Fitness Biceps Curl","Standing cable curl"],
-  idc:["Incline dumbbell curl","Bench at 45 degrees, arms hanging down. No swinging, slow on the way down.","Adjustable bench and dumbbells","Biceps curl machine"],
-  idbp:["Incline dumbbell press","Bench at 45 degrees. Press up without locking out, lower slowly, elbows about 45 degrees.","Adjustable bench, dumbbells to 50kg","Chest press machine"],
-  pf:["Pec fly machine","Sit tall, slight elbow bend. Pads together in front of the chest, squeeze, open slowly.","Life Fitness Pectoral Fly","Cable crossover, pulleys high"],
-  cc:["Cable crossover","Both pulleys high. Sweep down and together in front of the chest, squeeze, slow return.","Cable bank","Pec fly machine"],
-  ctpd:["Cable triceps pressdown","Elbows pinned to your sides. Press to lockout, control back up.","Cable bank, rope or bar","Diamond press up"],
-  ohce:["Overhead cable extension","Face away from the stack, rope overhead, elbows high and tight. Extend to lockout, lower slowly.","Cable bank, rope","Dumbbell overhead extension"],
-  dpu:["Diamond press up","Hands together under the chest. Lower the chest to the hands, elbows tucked, press up.","Floor","Close grip Smith press"],
+  sq:["Back squat","Bar on the rear delts, out of the rack at mid chest. Feet just outside shoulder width, down to at least parallel, drive up through the heels.","Power rack, bar and plates","Leg press or goblet squat"],
+  bp:["Bench press","Shoulder blades pinned back and down, feet flat. Lower to the lower chest, elbows about 45 degrees, press without locking out.","Flat bench in the rack with the safety arms set","Chest press machine"],
+  chin:["Assisted chin up","Palms facing you, shoulder width. Set the assist so the last rep is hard but clean. Chin over the bar, slow down.","Life Fitness Assist Chin","Lat pulldown"],
+  pu:["Pull up","Overhand, shoulder width, on the bar across the top of the rack. Dead hang to chin over the bar, slow on the way down. Band assisted if needed.","Pull up bar on the rack","Lat pulldown"],
+  row:["Seated row machine","Chest on the pad, neutral grip. Pull to the ribs leading with the elbows, squeeze the blades, control back.","Life Fitness Row","Seated cable row"],
+  scrow:["Seated cable row","Sit on the floor or a bench facing the stack, pulley low, V bar. Pull to the sternum with a tall chest, squeeze the blades, control the return.","Functional trainer, low pulley, V bar","Single arm dumbbell row"],
+  dbrow:["Single arm dumbbell row","One hand and knee on the bench, flat back. Row the dumbbell to the hip, squeeze, lower under control. No twisting.","Bench and dumbbells","Seated cable row"],
+  lpd:["Lat pulldown","Overhand, just wider than shoulders. Pull to the upper chest, elbows down and back, no leaning away.","Life Fitness Pulldown","Assisted chin up"],
+  mlat:["Lat pull (Matrix)","Thighs under the pads, overhand grip just wider than shoulders. Lean back slightly, pull to the top of the chest, slow return.","Matrix Lat Pull","Pull up on the rack bar"],
+  bcm:["Biceps curl machine","Upper arms flat on the pad. Curl and squeeze, lower all the way under control.","Life Fitness Biceps Curl","Fixed barbell curl"],
+  bbcurl:["Fixed barbell curl","Shoulder width grip on a fixed barbell. Elbows pinned to the ribs, curl up, squeeze, lower slowly. No swinging.","Fixed barbell rack","Cable curl"],
+  ccurl:["Cable curl","Straight bar on the low pulley. Elbows tight to the sides, curl up and squeeze, resist on the way down.","Cable station, low pulley","Dumbbell curl"],
+  idc:["Incline dumbbell curl","Bench at 45 degrees, arms hanging down. No swinging, slow on the way down.","Adjustable bench and dumbbells","Cable curl"],
+  idbp:["Incline dumbbell press","Bench at 45 degrees. Press up without locking out, lower slowly, elbows about 45 degrees.","Adjustable bench and dumbbells","Chest press machine"],
+  mcp:["Converging chest press","Seat set so the handles are at mid chest. Press out until the arms are near full extension, shoulders back against the pad, control the return.","Matrix Converging Chest Press","Incline dumbbell press"],
+  pf:["Pec fly machine","Sit tall, slight elbow bend. Pads together in front of the chest, squeeze, open slowly.","Life Fitness Pectoral Fly","Cable crossover"],
+  cc:["Cable crossover","Both pulleys high. Sweep down and together in front of the chest, squeeze, slow return.","Cable station or functional trainer","Pec fly machine"],
+  ctpd:["Cable triceps pressdown","Elbows pinned to your sides. Press to lockout, control back up.","Cable station, rope or bar","Diamond press up"],
+  ohce:["Overhead cable extension","Face away from the stack, rope overhead, elbows high and tight. Extend to lockout, lower slowly behind the head.","Cable station, rope","Dumbbell overhead extension"],
+  dpu:["Diamond press up","Hands together under the chest. Lower the chest to the hands, elbows tucked, press up.","Floor","Cable pressdown to failure"],
   spm:["Shoulder press machine","Sit tall, handles at collarbone height. Press up without locking out, lower under control.","Life Fitness Shoulder Press","Seated dumbbell press"],
+  mspm:["Converging shoulder press","Seat set so the hands start slightly above the shoulders. Back against the pad, press to full overhead without locking the elbows hard.","Matrix Converging Shoulder Press","Seated dumbbell press"],
+  dbsp:["Seated dumbbell press","Bench upright, dumbbells at ear height. Press up without clashing, lower slowly under control.","Adjustable bench and dumbbells","Shoulder press machine"],
   slc:["Seated leg curl","Pad on the lower calves, thigh pad snug. Curl hard, resist the whole way back.","Life Fitness Seated Leg Curl","Dumbbell Romanian deadlift"],
-  le:["Leg extension","Pad on the lower shins. Extend to straight, squeeze a beat, lower slowly.","Life Fitness Leg Extension","Leg press, shorter range"],
+  mslc:["Seated leg curl (Matrix)","Align the knees with the pivot, thigh pad snug, pad behind the ankles. Curl down hard and resist the return.","Matrix Seated Leg Curl","Dumbbell Romanian deadlift"],
+  le:["Leg extension","Pad on the lower shins. Extend to straight, squeeze a beat, lower slowly.","Leg Extension machine","Goblet squat"],
   lp:["Linear leg press","Feet shoulder width on the plate. Deep knee bend, press without locking hard.","Life Fitness Linear Leg Press","Back squat"],
-  clr:["Cable lateral raise","Side on to the stack, pulley low. Out to shoulder height with a soft elbow, lower slowly.","Cable bank","Dumbbell lateral raise"],
+  clr:["Cable lateral raise","Side on to the stack, pulley low. Out to shoulder height with a soft elbow, lower slowly.","Cable station or functional trainer","Dumbbell lateral raise"],
+  dblr:["Dumbbell lateral raise","Soft elbows, lead with the elbows not the hands. Up to shoulder height, lower slowly. Light weight, strict form.","Dumbbells","Cable lateral raise"],
   rdm:["Rear deltoid machine","Pec fly frame set to the rear delt side. Sweep out and back, squeeze, slow return.","Life Fitness Rear Deltoid","Face pull"],
-  fp:["Face pull","Rope at face height. Pull towards the eyes, elbows high and wide, squeeze the rear delts.","Cable bank, rope","Rear deltoid machine"],
-  scr:["Seated calf raise","Knees under the pad. Full stretch, pause, drive onto the toes, squeeze at the top.","Hammer Strength Seated Calf","Standing calf raise on a step"],
-  hlr:["Hanging leg raise","Dead hang from the rack bar. Legs to hip height or above, no swinging, lower with control.","Rack pull up bar","Decline bench sit up"]
+  fp:["Face pull","Rope at face height. Pull towards the eyes, elbows high and wide, squeeze the rear delts.","Cable station or functional trainer, rope","Rear deltoid machine"],
+  scr:["Seated calf raise","Knees under the pad. Full stretch, pause, drive onto the toes, squeeze at the top.","Hammer Strength Seated Calf","Standing dumbbell calf raise"],
+  dbcr:["Standing dumbbell calf raise","A dumbbell in each hand, balls of the feet on a plate or step. Full stretch at the bottom, pause, drive up and squeeze.","Dumbbells and a step or plate","Seated calf raise"],
+  hlr:["Hanging leg raise","Dead hang from the rack bar. Legs to hip height or above, no swinging, lower with control.","Pull up bar on the rack","Lying leg raise on the mat"],
+  llr:["Lying leg raise","Flat on the mat, hands under the hips. Legs to vertical, lower slowly without the heels touching down.","Mat","Hanging leg raise"]
 };
 
-/* ---------- default programme ---------- */
-const WARMUP = "5 minutes: easy cardio to raise the heart rate, then two progressively heavier ramp up sets of the first lift.";
+/* ---------- default programme, slot based ---------- */
+const WARMUP = {
+  leisure:"5 minutes: easy cardio on the bike or treadmill, then two progressively heavier ramp up sets of the first lift.",
+  office:"5 minutes: SkiErg or Concept2 rower to raise the heart rate, then two progressively heavier ramp up sets of the first lift."
+};
 function defaultProgramme(){
-  const B=(label,mins,notes,items)=>({label,mins,notes,items:items.map(i=>({ex:i[0],sets:i[1],reps:i[2],tempo:i[3],rest:i[4]}))});
+  // I(leisureEx, officeEx, sets, reps, tempo, rest, opts)
+  const I=(l,o,sets,reps,tempo,rest,opts)=>({byGym:{leisure:l,office:o},sets,reps,tempo,rest,
+    opts:opts||Array.from(new Set([l,o]))});
+  const B=(label,mins,notes,items)=>({label,mins,notes,items});
   return {
     id:"p_rack6", name:"6 Week Rack Split", weeks:6, warmup:WARMUP,
     days:[
       {title:"Back & Biceps", color:"var(--blue)",
-       focus:"Deadlift first off the floor, then machines and cables so you are not queuing for kit.",
+       focus:"Deadlift first off the floor, then pulling and arms with whatever the gym gives you.",
        blocks:[
-         B("1 · main lift",8,["bigthree","rampup","dlfloor"],[["dl",4,"5","2011",120]]),
-         B("2 · superset",8,["straight"],[["chin",3,"8","3010",0],["row",3,"10","3010",75]]),
-         B("3 · superset",7,["straight"],[["lpd",3,"12","3011",0],["bcm",3,"10","3010",60]]),
-         B("4 · finisher",3,["drop2"],[["idc",2,"12","3011",45]])
+         B("1 · main lift",8,["bigthree","rampup","dlfloor"],[ I("dl","dl",4,"5","2011",120,["dl"]) ]),
+         B("2 · superset",8,["straight"],[
+            I("chin","mlat",3,"8","3010",0,["chin","mlat","pu","lpd"]),
+            I("row","scrow",3,"10","3010",75,["row","scrow","dbrow"]) ]),
+         B("3 · superset",7,["straight"],[
+            I("lpd","dbrow",3,"12","3011",0,["lpd","dbrow","pu","scrow"]),
+            I("bcm","bbcurl",3,"10","3010",60,["bcm","bbcurl","ccurl","idc"]) ]),
+         B("4 · finisher",3,["drop2"],[ I("idc","idc",2,"12","3011",45,["idc","ccurl","bbcurl"]) ])
        ]},
       {title:"Chest & Triceps", color:"var(--red)",
-       focus:"Barbell bench while you are fresh, then dumbbells, the fly machine and cables.",
+       focus:"Barbell bench while you are fresh, then pressing and cables.",
        blocks:[
-         B("1 · main lift",8,["bigthree","rampup","benchsafe"],[["bp",4,"5","3010",120]]),
-         B("2 · superset",8,["straight"],[["idbp",3,"8","4010",0],["ctpd",3,"12","2010",75]]),
-         B("3 · superset",7,["straight"],[["pf",3,"15","3011",0],["ohce",3,"12","3010",60]]),
-         B("4 · finisher",3,["restpause"],[["dpu",1,"F","2010",0]])
+         B("1 · main lift",8,["bigthree","rampup","benchsafe"],[ I("bp","bp",4,"5","3010",120,["bp","mcp"]) ]),
+         B("2 · superset",8,["straight"],[
+            I("idbp","idbp",3,"8","4010",0,["idbp","mcp"]),
+            I("ctpd","ctpd",3,"12","2010",75,["ctpd","ohce","dpu"]) ]),
+         B("3 · superset",7,["straight"],[
+            I("pf","cc",3,"15","3011",0,["pf","cc"]),
+            I("ohce","ohce",3,"12","3010",60,["ohce","ctpd"]) ]),
+         B("4 · finisher",3,["restpause"],[ I("dpu","dpu",1,"F","2010",0,["dpu","ctpd"]) ])
        ]},
       {title:"Legs & Shoulders", color:"var(--yellow)",
-       focus:"Squat out of the rack, then the press machine and leg curl, finishing on cables and calves.",
+       focus:"Squat out of the rack, then pressing, hamstrings, delts and calves.",
        blocks:[
-         B("1 · main lift",8,["bigthree","rampup","racksafety"],[["sq",4,"5","4010",120]]),
-         B("2 · superset",8,["straight"],[["spm",3,"8","3010",0],["slc",3,"10","4011",75]]),
-         B("3 · superset",7,["straight"],[["clr",3,"15","2010",0],["rdm",3,"15","2011",60]]),
-         B("4 · finisher",3,[],[["scr",2,"20","3011",30],["hlr",2,"12","3010",30]])
+         B("1 · main lift",8,["bigthree","rampup","racksafety"],[ I("sq","sq",4,"5","4010",120,["sq","lp"]) ]),
+         B("2 · superset",8,["straight"],[
+            I("spm","mspm",3,"8","3010",0,["spm","mspm","dbsp"]),
+            I("slc","mslc",3,"10","4011",75,["slc","mslc"]) ]),
+         B("3 · superset",7,["straight"],[
+            I("clr","clr",3,"15","2010",0,["clr","dblr"]),
+            I("rdm","fp",3,"15","2011",60,["rdm","fp"]) ]),
+         B("4 · finisher",3,[],[
+            I("scr","dbcr",2,"20","3011",30,["scr","dbcr"]),
+            I("hlr","hlr",2,"12","3010",30,["hlr","llr"]) ])
        ]}
     ]
   };
 }
 
 /* ---------- state ---------- */
-let DB, view = {tab:"home"};
+let DB, view={tab:"home"};
 
 function seed(){
   const ex={}; for(const k in EXD){ const[n,c,kit,alt]=EXD[k]; ex[k]={name:n,cue:c,kit,alt,link:""}; }
   const p=defaultProgramme();
   const c={id:uid("c_"),prog:p.id,name:"Cycle 1",started:todayISO(),logs:{}};
-  return {v:1, ex, progs:[p], cycles:[c], active:c.id, settings:{unit:"kg"}};
+  return {v:2, ex, gyms:JSON.parse(JSON.stringify(GYMS)), activeGym:"leisure",
+          progs:[p], cycles:[c], active:c.id, settings:{unit:"kg"}};
 }
+
+/* ---------- migration v1 to v2, with a safety copy ---------- */
+function migrate(raw){
+  const old=JSON.parse(raw);
+  if(old.v>=2) return old;
+  try{ localStorage.setItem(BACKUP_KEY, raw); }catch(e){}
+  const out=JSON.parse(raw);
+
+  // 1. refresh the exercise library, keeping any links the user saved
+  const links={}; for(const k in (out.ex||{})) if(out.ex[k] && out.ex[k].link) links[k]=out.ex[k].link;
+  const ex={}; for(const k in EXD){ const[n,c,kit,alt]=EXD[k];
+    ex[k]={name:n,cue:c,kit,alt,link:links[k]||""}; }
+  for(const k in (out.ex||{})) if(!ex[k]) ex[k]=out.ex[k];   // keep user added exercises
+  out.ex=ex;
+
+  // 2. replace the built in programme with the slot based version, same block
+  //    and item order so existing log keys still line up
+  out.progs=(out.progs||[]).map(p=>{
+    if(p.id==="p_rack6") return defaultProgramme();
+    p.warmup = typeof p.warmup==="string" ? {leisure:p.warmup, office:p.warmup} : (p.warmup||WARMUP);
+    (p.days||[]).forEach(d=>(d.blocks||[]).forEach(b=>{
+      b.items=(b.items||[]).map(it=> it.byGym ? it :
+        ({byGym:{leisure:it.ex,office:it.ex},sets:it.sets,reps:it.reps,tempo:it.tempo,rest:it.rest,opts:[it.ex]}));
+    }));
+    return p;
+  });
+
+  // 3. re-key logged sets from "block-item-exercise" to "block-item"
+  (out.cycles||[]).forEach(c=>{
+    Object.keys(c.logs||{}).forEach(k=>{
+      const log=c.logs[k], moved={};
+      Object.keys(log.sets||{}).forEach(sk=>{
+        const parts=sk.split("-");
+        const nk = parts.length>2 ? parts.slice(0,2).join("-") : sk;
+        moved[nk]=log.sets[sk];
+      });
+      log.sets=moved;
+      if(!log.gym) log.gym="leisure";           // everything so far was the leisure centre
+      if(!log.over) log.over={};
+    });
+  });
+
+  out.gyms=out.gyms||JSON.parse(JSON.stringify(GYMS));
+  out.activeGym=out.activeGym||"leisure";
+  out.v=2;
+  return out;
+}
+
 function load(){
-  try{ const r=localStorage.getItem(KEY); if(r){ DB=JSON.parse(r); return; } }catch(e){}
-  DB=seed(); save();
+  let raw=null;
+  try{ raw=localStorage.getItem(KEY); }catch(e){}
+  if(!raw){ DB=seed(); save(true); return; }
+  try{
+    DB=migrate(raw);
+    save(true);
+  }catch(err){
+    console.error("migration failed",err);
+    alert("Could not upgrade the saved data, so it has been left exactly as it was. Nothing was overwritten. Export a backup from the Data tab and send it on.");
+    try{ DB=JSON.parse(raw); }catch(e){ DB=seed(); }
+  }
 }
 let saveT=null;
-function save(){ clearTimeout(saveT); saveT=setTimeout(()=>{
-  try{ localStorage.setItem(KEY, JSON.stringify(DB)); }
-  catch(e){ alert("Could not save. Storage may be full."); } },250); }
+function save(now){
+  const go=()=>{ try{ localStorage.setItem(KEY,JSON.stringify(DB)); }
+    catch(e){ alert("Could not save. Storage may be full."); } };
+  clearTimeout(saveT);
+  if(now) go(); else saveT=setTimeout(go,250);
+}
 
-const prog = (id) => DB.progs.find(p=>p.id===id);
+/* ---------- helpers ---------- */
+const prog = id => DB.progs.find(p=>p.id===id);
 const cyc  = () => DB.cycles.find(c=>c.id===DB.active) || DB.cycles[0];
 const sKey = (w,d) => w+"-"+d;
-const iKey = (bi,ii,ex) => bi+"-"+ii+"-"+ex;
+const slotKey = (bi,ii) => bi+"-"+ii;
+const warmupFor = (p,g) => typeof p.warmup==="string" ? p.warmup : (p.warmup&&p.warmup[g]) || WARMUP[g];
+
+function resolveEx(item, slot, log){
+  if(log && log.over && log.over[slot]) return log.over[slot];
+  const g=DB.activeGym;
+  return (item.byGym && (item.byGym[g] || item.byGym.leisure)) || item.ex || Object.keys(DB.ex)[0];
+}
 function sessions(c){
   const p=prog(c.prog); if(!p) return [];
   const out=[]; let n=1;
@@ -223,27 +336,37 @@ function sessions(c){
 }
 function logFor(c,w,di,make){
   const k=sKey(w,di);
-  if(!c.logs[k] && make) c.logs[k]={date:"",done:false,sets:{}};
-  return c.logs[k] || {sets:{}};
+  if(!c.logs[k] && make) c.logs[k]={date:"",done:false,sets:{},over:{},gym:DB.activeGym};
+  const l=c.logs[k]||{sets:{}};
+  if(make){ l.over=l.over||{}; }
+  return l;
 }
-function rowsFor(log,key,exId,n){
-  if(!log.sets[key]) log.sets[key]={ex:exId,rows:Array.from({length:n},()=>({w:"",r:"",d:false}))};
-  const s=log.sets[key];
+function rowsFor(log,slot,exId,n){
+  if(!log.sets[slot]) log.sets[slot]={ex:exId,rows:Array.from({length:n},()=>({w:"",r:"",d:false}))};
+  const s=log.sets[slot];
   while(s.rows.length<n) s.rows.push({w:"",r:"",d:false});
   return s.rows;
 }
-function prevSession(c,w,di){
-  for(let x=w-1;x>=1;x--){ const l=c.logs[sKey(x,di)]; if(l&&Object.keys(l.sets).length) return l; }
-  const older=DB.cycles.filter(o=>o.prog===c.prog&&o.id!==c.id);
-  for(let i=older.length-1;i>=0;i--){
-    const p=prog(c.prog);
-    for(let x=p.weeks;x>=1;x--){ const l=older[i].logs[sKey(x,di)]; if(l&&Object.keys(l.sets).length) return l; }
+/* previous numbers: prefer the same machine, else the most recent on this slot */
+function prevFor(c,w,di,slot,exId){
+  const p=prog(c.prog);
+  const scan=[];
+  for(let x=w-1;x>=1;x--) if(c.logs[sKey(x,di)]) scan.push(c.logs[sKey(x,di)]);
+  DB.cycles.filter(o=>o.prog===c.prog&&o.id!==c.id).reverse().forEach(o=>{
+    for(let x=p.weeks;x>=1;x--) if(o.logs[sKey(x,di)]) scan.push(o.logs[sKey(x,di)]);
+  });
+  let fallback=null;
+  for(const l of scan){
+    const s=l.sets&&l.sets[slot];
+    if(!s||!s.rows||!s.rows.some(r=>r.w)) continue;
+    if(s.ex===exId) return {rows:s.rows,same:true};
+    if(!fallback) fallback={rows:s.rows,same:false,ex:s.ex};
   }
-  return null;
+  return fallback;
 }
 
-/* ---------- audio: generated WAV blobs, works when backgrounded ---------- */
-function wavURL(samples, rate){
+/* ---------- audio ---------- */
+function wavURL(samples,rate){
   const n=samples.length, buf=new ArrayBuffer(44+n*2), v=new DataView(buf);
   const w=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i));};
   w(0,"RIFF"); v.setUint32(4,36+n*2,true); w(8,"WAVE"); w(12,"fmt ");
@@ -254,62 +377,55 @@ function wavURL(samples, rate){
   return URL.createObjectURL(new Blob([buf],{type:"audio/wav"}));
 }
 const hush=new Audio(), alarm=new Audio();
-(function buildAudio(){
-  const r1=8000, a=new Float32Array(r1);
-  for(let i=0;i<r1;i++) a[i]=(Math.random()-0.5)*0.0006;   // near silent keep alive loop
+(function(){
+  const r1=8000,a=new Float32Array(r1);
+  for(let i=0;i<r1;i++) a[i]=(Math.random()-0.5)*0.0006;
   hush.src=wavURL(a,r1); hush.loop=true; hush.preload="auto";
-  const r2=22050, b=new Float32Array(Math.floor(r2*1.1));
+  const r2=22050,b=new Float32Array(Math.floor(r2*1.1));
   for(let t=0;t<3;t++){ const off=Math.floor(t*0.28*r2), len=Math.floor(0.16*r2);
     for(let i=0;i<len;i++){ const env=Math.min(1,i/200)*Math.max(0,1-i/len);
       b[off+i]=Math.sin(2*Math.PI*880*i/r2)*0.55*env; } }
   alarm.src=wavURL(b,r2); alarm.preload="auto";
 })();
-function keepAwakeOn(){ hush.play().catch(()=>{}); }
-function keepAwakeOff(){ try{hush.pause();}catch(e){} }
 
-/* ---------- screen wake lock ---------- */
+/* ---------- wake lock ---------- */
 let wl=null;
-async function wakeOn(){ try{ if(navigator.wakeLock && !wl) wl=await navigator.wakeLock.request("screen"); }catch(e){} }
+async function wakeOn(){ try{ if(navigator.wakeLock&&!wl) wl=await navigator.wakeLock.request("screen"); }catch(e){} }
 function wakeOff(){ try{ wl&&wl.release(); }catch(e){} wl=null; }
 
-/* ---------- timer: wall clock, survives backgrounding ---------- */
+/* ---------- timer ---------- */
 const TK="ironlog.timer";
-let T=null;
+let T=null,fired=false;
 function timerStart(secs,label,kind){
   T={ends:now()+secs*1000,total:secs,label:label||"",kind:kind||"REST"};
-  localStorage.setItem(TK,JSON.stringify(T));
-  keepAwakeOn(); wakeOn(); paintTimer();
+  localStorage.setItem(TK,JSON.stringify(T)); hush.play().catch(()=>{}); wakeOn(); paintTimer();
 }
-function timerStop(){ T=null; localStorage.removeItem(TK); keepAwakeOff(); paintTimer(); }
-function timerRestore(){ try{ const r=localStorage.getItem(TK); if(r){ T=JSON.parse(r);
-  if(T.ends<=now()) timerStop(); else keepAwakeOn(); } }catch(e){} }
-function timerLeft(){ return T ? Math.max(0,Math.round((T.ends-now())/1000)) : 0; }
+function timerStop(){ T=null; localStorage.removeItem(TK); try{hush.pause();}catch(e){} paintTimer(); }
+function timerLeft(){ return T?Math.max(0,Math.round((T.ends-now())/1000)):0; }
 function paintTimer(){
   const bar=document.getElementById("timerbar");
   if(!T){ bar.style.display="none"; return; }
   bar.style.display="block";
   const left=timerLeft();
-  document.getElementById("tnum").textContent=fmtT(left);
-  document.getElementById("tnum").style.color = left<=5 ? "var(--red)" : "var(--text)";
+  const n=document.getElementById("tnum");
+  n.textContent=fmtT(left); n.style.color=left<=5?"var(--red)":"var(--text)";
   document.getElementById("tlabel").textContent=T.label;
   document.getElementById("tkind").textContent=T.kind;
   const b=document.getElementById("tbar");
   b.style.width=(T.total?(left/T.total*100):0)+"%";
-  b.style.background = left<=5 ? "var(--red)" : "var(--green)";
+  b.style.background=left<=5?"var(--red)":"var(--green)";
 }
-let fired=false;
 setInterval(()=>{
   if(!T){ fired=false; return; }
-  const left=timerLeft();
   paintTimer();
-  if(left<=0 && !fired){
+  if(timerLeft()<=0&&!fired){
     fired=true;
     alarm.currentTime=0; alarm.play().catch(()=>{});
     if(navigator.vibrate) navigator.vibrate([300,120,300]);
-    if(window.Notification && Notification.permission==="granted"){
-      try{ new Notification("Rest over", {body:T.label||"Next set", tag:"ironlog"}); }catch(e){}
+    if(window.Notification&&Notification.permission==="granted"){
+      try{ new Notification("Rest over",{body:T.label||"Next set",tag:"ironlog"}); }catch(e){}
     }
-    setTimeout(()=>{ timerStop(); fired=false; }, 1200);
+    setTimeout(()=>{ timerStop(); fired=false; },1200);
   }
 },250);
 document.addEventListener("visibilitychange",()=>{ if(!document.hidden){ paintTimer(); if(T) wakeOn(); } });
@@ -321,23 +437,21 @@ document.getElementById("tadd").onclick=()=>{ if(!T)return; T.ends+=30000; T.tot
 /* ---------- charts ---------- */
 function lineChart(pts,color,h){
   h=h||70; const W=300;
-  if(pts.length<2){ return `<div class="tiny faint" style="padding:6px 0">Not enough data yet</div>`; }
+  if(pts.length<2) return `<div class="tiny faint" style="padding:6px 0">Not enough data yet</div>`;
   const ys=pts.map(p=>p.y), mn=Math.min(...ys), mx=Math.max(...ys), span=(mx-mn)||1;
   const X=i=>8+i*(W-16)/(pts.length-1), Y=v=>h-10-((v-mn)/span)*(h-22);
   const d=pts.map((p,i)=>(i?"L":"M")+X(i).toFixed(1)+" "+Y(p.y).toFixed(1)).join(" ");
   const dots=pts.map((p,i)=>`<circle cx="${X(i).toFixed(1)}" cy="${Y(p.y).toFixed(1)}" r="2.6" fill="${color}"/>`).join("");
-  return `<svg viewBox="0 0 ${W} ${h}" style="width:100%;height:${h}px;display:block">
-    <path d="${d}" class="gline" stroke="${color}"/>${dots}</svg>`;
+  return `<svg viewBox="0 0 ${W} ${h}" style="width:100%;height:${h}px;display:block"><path d="${d}" class="gline" stroke="${color}"/>${dots}</svg>`;
 }
 function barChart(vals,labels,color,h){
-  h=h||64; const W=300, n=vals.length||1, mx=Math.max(1,...vals), bw=(W-8)/n;
+  h=h||64; const W=300,n=vals.length||1,mx=Math.max(1,...vals),bw=(W-8)/n;
   return `<svg viewBox="0 0 ${W} ${h}" style="width:100%;height:${h}px;display:block">`+
     vals.map((v,i)=>{ const bh=v?Math.max(2,(v/mx)*(h-16)):1.5;
-      return `<rect x="${(4+i*bw+bw*0.15).toFixed(1)}" y="${(h-12-bh).toFixed(1)}"
-        width="${(bw*0.7).toFixed(1)}" height="${bh.toFixed(1)}" rx="1.5"
-        fill="${v?color:"var(--line)"}"/>
-        <text x="${(4+i*bw+bw/2).toFixed(1)}" y="${h-2}" font-size="8" fill="#6B7178"
-        text-anchor="middle" font-family="monospace">${esc(labels[i])}</text>`;}).join("")+`</svg>`;
+      return `<rect x="${(4+i*bw+bw*0.15).toFixed(1)}" y="${(h-12-bh).toFixed(1)}" width="${(bw*0.7).toFixed(1)}"
+        height="${bh.toFixed(1)}" rx="1.5" fill="${v?color:"var(--line)"}"/>
+        <text x="${(4+i*bw+bw/2).toFixed(1)}" y="${h-2}" font-size="8" fill="#6B7178" text-anchor="middle"
+        font-family="monospace">${esc(labels[i])}</text>`;}).join("")+`</svg>`;
 }
 
 /* ---------- views ---------- */
@@ -350,18 +464,19 @@ function render(){
   paintTimer();
 }
 
-/* --- HOME --- */
 function vHome(){
   const c=cyc(); if(!c){ V.innerHTML=`<div class="card">No cycle yet. Go to Plans and start one.</div>`; return; }
   const p=prog(c.prog), list=sessions(c);
   const done=list.filter(s=>(c.logs[sKey(s.w,s.di)]||{}).done).length;
   const pct=Math.round(done/list.length*100);
-  const started=list.find(s=>{const l=c.logs[sKey(s.w,s.di)]; return l&&!l.done&&Object.keys(l.sets).length;});
+  const started=list.find(s=>{const l=c.logs[sKey(s.w,s.di)]; return l&&!l.done&&Object.keys(l.sets||{}).length;});
   const next=started||list.find(s=>!(c.logs[sKey(s.w,s.di)]||{}).done);
   let h=`<div class="disp" style="font-size:32px;font-weight:700;line-height:1">${esc(p.name)}</div>
-  <div class="disp" style="font-size:14px;color:var(--red);letter-spacing:.14em;margin-top:2px">
-    ${esc(c.name)} · ${p.days.length} DAYS A WEEK · ${list.length} SESSIONS</div>
-  <div class="card" style="margin-top:16px">
+  <div class="row" style="margin-top:6px;gap:8px;flex-wrap:wrap">
+    <span class="disp" style="font-size:14px;color:var(--red);letter-spacing:.14em">${esc(c.name)} · ${list.length} SESSIONS</span>
+    <button class="gympill" data-gym="cycle">${esc(gymName(DB.activeGym))} ⇄</button>
+  </div>
+  <div class="card" style="margin-top:14px">
     <div class="row"><span class="tiny dim">Sessions completed</span><span class="sp"></span>
       <span class="mono" style="font-size:19px;font-weight:700">${done}<span class="faint" style="font-size:13px">/${list.length} · ${pct}%</span></span></div>
     <div class="bar" style="margin-top:8px"><i style="width:${pct}%;background:var(--red)"></i></div>`;
@@ -370,7 +485,7 @@ function vHome(){
       ${started?"Continue":"Start"} · Week ${next.w} Day ${next.day}, ${esc(next.d.title)}</button>`;
   else h+=`<div style="margin-top:12px;color:var(--green);font-weight:700">Cycle complete. Start the next one from Plans.</div>`;
   h+=`</div><div class="card" style="background:var(--panel2)"><div class="tiny dim" style="line-height:1.6">
-    Same exercises all the way through. Add a small amount of weight, or one clean rep, on at least one set each week. ${TECH.busy}</div></div>`;
+    Same slots every week, add a little weight each time. The gym button swaps every exercise to the kit at that site. ${TECH.busy}</div></div>`;
   for(let w=1;w<=p.weeks;w++){
     const items=list.filter(s=>s.w===w), wd=items.filter(s=>(c.logs[sKey(s.w,s.di)]||{}).done).length;
     h+=`<div class="row" style="margin:16px 0 8px"><span class="disp" style="font-size:18px;font-weight:700">WEEK ${w}</span>
@@ -381,7 +496,7 @@ function vHome(){
         border-left:4px solid ${s.d.color};opacity:${l.done?.72:1}" data-go="session" data-w="${s.w}" data-di="${s.di}">
         <span class="mono" style="color:${s.d.color};font-weight:700;width:16px">${s.day}</span>
         <span style="flex:1"><span style="display:block;font-size:15px;font-weight:700">${esc(s.d.title)}</span>
-        <span class="tiny faint">Session ${s.n}${l.date?", "+fmtD(l.date):""}</span></span>
+        <span class="tiny faint">Session ${s.n}${l.date?", "+fmtD(l.date):""}${l.gym&&l.done?" · "+esc(gymName(l.gym)):""}</span></span>
         <span class="mono tiny" style="color:${l.done?s.d.color:st?"var(--yellow)":"var(--faint)"}">
         ${l.done?"✓ done":st?"in progress":"→"}</span></button>`;
     });
@@ -389,13 +504,13 @@ function vHome(){
   V.innerHTML=h;
 }
 
-/* --- SESSION --- */
 function vSession(){
   const c=cyc(), p=prog(c.prog), d=p.days[view.di], w=view.w;
-  const log=logFor(c,w,view.di,true), prev=prevSession(c,w,view.di);
+  const log=logFor(c,w,view.di,true);
   let tot=0,don=0;
   d.blocks.forEach((b,bi)=>b.items.forEach((it,ii)=>{ tot+=it.sets;
-    don+=rowsFor(log,iKey(bi,ii,it.ex),it.ex,it.sets).filter(r=>r.d).length; }));
+    const slot=slotKey(bi,ii);
+    don+=rowsFor(log,slot,resolveEx(it,slot,log),it.sets).filter(r=>r.d).length; }));
   let h=`<div class="row" style="align-items:flex-start">
     <button class="btn sm" data-go="home">←</button>
     <div style="flex:1">
@@ -405,15 +520,19 @@ function vSession(){
         <span class="mono tiny dim" id="setcount">${don}/${tot} sets</span>
         <input type="date" id="sdate" value="${log.date||""}" style="width:auto;padding:4px 8px;font-size:12px">
       </div>
+      <div class="row" style="margin-top:8px;gap:8px;flex-wrap:wrap">
+        <button class="gympill" data-gym="session">${esc(gymName(DB.activeGym))} ⇄</button>
+        <span class="tiny faint">tap to swap gym</span>
+      </div>
     </div></div>
   <div class="tiny dim" style="margin:12px 0 10px;line-height:1.5">${esc(d.focus||"")}</div>
   <div class="bar"><i id="sbar" style="width:${tot?don/tot*100:0}%;background:${d.color}"></i></div>
   <div class="card" style="margin-top:16px;border-left:4px solid var(--green)">
     <div class="row"><span class="disp" style="font-size:15px;font-weight:700;letter-spacing:.1em">0 · WARM UP</span>
       <span class="sp"></span><span class="mono tiny faint">5 min</span></div>
-    <div class="tiny dim" style="margin-top:6px;line-height:1.5">${esc(p.warmup||WARMUP)}</div>
+    <div class="tiny dim" style="margin-top:6px;line-height:1.5">${esc(warmupFor(p,DB.activeGym))}</div>
     <button class="btn full" style="margin-top:10px;border-color:var(--green);color:var(--green)"
-      data-timer="300" data-label="Easy cardio, then two ramp up sets" data-kind="WARM UP">Start 5 minute warm up</button>
+      data-timer="300" data-label="Warm up, then two ramp up sets" data-kind="WARM UP">Start 5 minute warm up</button>
   </div>`;
   d.blocks.forEach((b,bi)=>{
     h+=`<div class="row" style="margin:18px 0 8px">
@@ -421,11 +540,13 @@ function vSession(){
       <span class="sep"></span><span class="mono tiny faint">${b.mins} min</span></div>`;
     (b.notes||[]).forEach(k=>{ if(TECH[k]) h+=`<div class="note">${esc(TECH[k])}</div>`; });
     b.items.forEach((it,ii)=>{
-      const key=iKey(bi,ii,it.ex), ex=DB.ex[it.ex]||{name:it.ex,cue:"",kit:"",alt:""};
-      const rows=rowsFor(log,key,it.ex,it.sets);
-      const pr=prev&&prev.sets[key]?prev.sets[key].rows:null;
-      const best=pr?Math.max(0,...pr.map(r=>parseFloat(r.w)||0)):0;
+      const slot=slotKey(bi,ii), exId=resolveEx(it,slot,log);
+      const ex=DB.ex[exId]||{name:exId,cue:"",kit:"",alt:""};
+      const rows=rowsFor(log,slot,exId,it.sets);
+      if(log.sets[slot].ex!==exId) log.sets[slot].ex=exId;
+      const pv=prevFor(c,w,view.di,slot,exId);
       const link=ex.link||("https://www.youtube.com/results?search_query="+encodeURIComponent(ex.name+" exercise proper form technique"));
+      const over=log.over&&log.over[slot];
       h+=`<div class="card">
         <div class="row" style="align-items:flex-start">
           <div style="flex:1">
@@ -433,33 +554,39 @@ function vSession(){
             <div class="tiny faint" style="margin-top:3px">${esc(ex.kit||"")}</div>
             <div class="row" style="margin-top:6px;gap:10px;flex-wrap:wrap">
               <span class="mono tiny dim">${it.sets} × ${esc(it.reps)}</span>
-              <button class="mono tiny" data-cue="${key}" style="background:none;border:none;padding:0;
+              <button class="mono tiny" data-cue="${slot}" style="background:none;border:none;padding:0;
                 color:${d.color};text-decoration:underline dotted">tempo ${esc(it.tempo)}</button>
               <span class="mono tiny ${it.rest?"dim":"faint"}">${it.rest?"rest "+it.rest+"sec":"no rest"}</span>
             </div></div>
-          <span class="mono tiny" id="cnt-${key}" style="color:var(--faint)">${rows.filter(r=>r.d).length}/${it.sets}</span>
+          <span class="mono tiny" id="cnt-${slot}" style="color:${rows.filter(r=>r.d).length===it.sets?"var(--green)":"var(--faint)"}">${rows.filter(r=>r.d).length}/${it.sets}</span>
         </div>
-        <div id="cue-${key}" style="display:none;margin-top:10px;padding:10px;background:var(--panel2);
-          border-radius:8px" class="tiny dim">
+        <div id="cue-${slot}" style="display:none;margin-top:10px;padding:10px;background:var(--panel2);border-radius:8px" class="tiny dim">
           <b style="color:var(--text)">How to do it</b><br>${esc(ex.cue)}
           <div class="faint" style="margin-top:8px">Tempo ${esc(it.tempo)}</div>
-          <div style="color:var(--yellow);margin-top:6px">If it is taken: ${esc(ex.alt||"pick the closest machine")}</div>
+          <div style="color:var(--yellow);margin-top:6px">If it is taken: ${esc(ex.alt||"use the swap button")}</div>
         </div>
         <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
           <a class="pill" href="${esc(link)}" target="_blank" rel="noreferrer" style="color:${d.color};text-decoration:none">▶ demo ↗</a>
-          <button class="pill" data-setlink="${esc(it.ex)}">set link</button>
+          <button class="pill${over?" on":""}" data-swap="${bi}.${ii}">⇄ swap${over?" (set)":""}</button>
+          <button class="pill" data-setlink="${esc(exId)}">link</button>
         </div>
-        ${best>0?`<div class="mono tiny faint" style="margin-top:8px">Last: ${pr.filter(r=>r.w).map(r=>r.w+"×"+(r.r||"?")).join("  ")}</div>`:""}
+        <div id="swap-${slot}" style="display:none;margin-top:8px">
+          <div class="tiny faint" style="margin-bottom:4px">Swap this slot for today</div>
+          ${(it.opts||[exId]).map(o=>{ const e2=DB.ex[o]||{name:o,kit:""};
+            return `<button class="swapitem${o===exId?" cur":""}" data-pick="${bi}.${ii}.${o}">
+              <b>${esc(e2.name)}</b><div class="tiny faint">${esc(e2.kit||"")}</div></button>`; }).join("")}
+          <button class="btn sm full" style="margin-top:8px" data-makedef="${bi}.${ii}">
+            Make ${esc(DB.ex[exId]?DB.ex[exId].name:exId)} the default at ${esc(gymName(DB.activeGym))}</button>
+        </div>
+        ${pv?`<div class="mono tiny faint" style="margin-top:8px">Last: ${pv.rows.filter(r=>r.w).map(r=>r.w+"×"+(r.r||"?")).join("  ")}${pv.same?"":" · on "+esc((DB.ex[pv.ex]||{}).name||pv.ex)}</div>`:""}
         <div class="sets">`;
       rows.forEach((r,ri)=>{
-        const ph=pr&&pr[ri]&&pr[ri].w?pr[ri]:null;
+        const ph=pv&&pv.rows[ri]&&pv.rows[ri].w?pv.rows[ri]:null;
         h+=`<div class="setrow">
           <span class="mono tiny faint" style="text-align:center">${ri+1}</span>
-          <input inputmode="decimal" placeholder="${ph?ph.w+" kg":"kg"}" value="${esc(r.w)}"
-            data-in="w" data-key="${key}" data-i="${ri}">
-          <input inputmode="numeric" placeholder="${ph&&ph.r?ph.r+" reps":"reps"}" value="${esc(r.r)}"
-            data-in="r" data-key="${key}" data-i="${ri}">
-          <button class="tick${r.d?" on":""}" data-tick="${key}" data-i="${ri}" data-rest="${it.rest}"
+          <input inputmode="decimal" placeholder="${ph?ph.w+" kg":"kg"}" value="${esc(r.w)}" data-in="w" data-key="${slot}" data-i="${ri}">
+          <input inputmode="numeric" placeholder="${ph&&ph.r?ph.r+" reps":"reps"}" value="${esc(r.r)}" data-in="r" data-key="${slot}" data-i="${ri}">
+          <button class="tick${r.d?" on":""}" data-tick="${slot}" data-i="${ri}" data-rest="${it.rest}"
             data-ex="${esc(ex.name)}" style="${r.d?`background:${d.color};border-color:${d.color}`:""}">✓</button>
         </div>`;
       });
@@ -469,20 +596,20 @@ function vSession(){
   h+=`<button class="btn solid full" id="finish" style="background:${log.done?"var(--panel2)":d.color};
     color:${log.done?"var(--dim)":"#101216"}">${log.done?"Completed, tap to reopen":"Finish session"}</button>`;
   V.innerHTML=h;
+  save();
 }
 
-/* --- STATS --- */
 function vStats(){
-  const rows={}; // exId -> [{date,best1rm,topw,vol}]
+  const rows={};
   DB.cycles.forEach(c=>{
-    const p=prog(c.prog); if(!p) return;
+    if(!prog(c.prog)) return;
     Object.keys(c.logs).forEach(k=>{
-      const l=c.logs[k], date=l.date||"";
+      const l=c.logs[k];
       Object.values(l.sets||{}).forEach(s=>{
-        let top=0,one=0,vol=0;
-        s.rows.forEach(r=>{ const w=parseFloat(r.w)||0, rp=parseFloat(r.r)||0;
-          if(w>top) top=w; const e=e1rm(w,rp); if(e>one) one=e; vol+=w*rp; });
-        if(top>0){ (rows[s.ex]=rows[s.ex]||[]).push({date,top,one,vol,k,cid:c.id}); }
+        let top=0,one=0;
+        s.rows.forEach(r=>{ const w=parseFloat(r.w)||0,rp=parseFloat(r.r)||0;
+          if(w>top) top=w; const e=e1rm(w,rp); if(e>one) one=e; });
+        if(top>0) (rows[s.ex]=rows[s.ex]||[]).push({top,one,gym:l.gym||"leisure"});
       });
     });
   });
@@ -500,51 +627,54 @@ function vStats(){
     <div><div class="mono" style="font-size:22px;font-weight:700">${totSets}</div><div class="tiny faint">sets logged</div></div>
     <div><div class="mono" style="font-size:22px;font-weight:700">${Math.round(totVol/1000)}t</div><div class="tiny faint">total volume</div></div>
   </div></div>`;
-  if(!order.length) h+=`<div class="card tiny dim">Log some weights and your strength curves appear here.</div>`;
-  if(p){ // weekly volume for active cycle
+  if(!order.length) h+=`<div class="card tiny dim">Log some weights and your strength curves appear here, one per machine.</div>`;
+  if(p&&c){
     const vols=[],labs=[];
     for(let w=1;w<=p.weeks;w++){ let v=0;
       p.days.forEach((d,di)=>{ const l=c.logs[sKey(w,di)]; if(l) Object.values(l.sets||{}).forEach(s=>
         s.rows.forEach(r=>v+=(parseFloat(r.w)||0)*(parseFloat(r.r)||0))); });
       vols.push(Math.round(v)); labs.push("w"+w); }
     if(vols.some(v=>v>0)) h+=`<div class="card"><div class="row"><b style="font-size:14px">Weekly volume</b>
-      <span class="sp"></span><span class="mono tiny faint">kg lifted</span></div>
-      ${barChart(vols,labs,"var(--red)")}</div>`;
+      <span class="sp"></span><span class="mono tiny faint">kg lifted</span></div>${barChart(vols,labs,"var(--red)")}</div>`;
   }
   order.forEach(exId=>{
     const list=rows[exId], ex=DB.ex[exId]||{name:exId};
     const pts=list.map((r,i)=>({y:r.one||r.top,x:i}));
-    const first=list[0], last=list[list.length-1];
-    const dTop=Math.round((last.top-first.top)*10)/10;
+    const last=list[list.length-1], first=list[0];
     const d1=Math.round((last.one-first.one)*10)/10;
+    const gyms=[...new Set(list.map(r=>r.gym))].map(gymName).join(", ");
     h+=`<div class="card">
       <div class="row"><b style="font-size:14px">${esc(ex.name)}</b><span class="sp"></span>
         <span class="mono tiny" style="color:${d1>0?"var(--green)":"var(--faint)"}">${d1>0?"+"+d1:d1||"flat"} kg e1RM</span></div>
-      <div class="mono tiny faint" style="margin-top:2px">top ${last.top}kg · est 1RM ${last.one||"-"}kg · ${list.length} sessions ${dTop>0?"· +"+dTop+"kg top set":""}</div>
+      <div class="mono tiny faint" style="margin-top:2px">top ${last.top}kg · est 1RM ${last.one||"-"}kg · ${list.length} sessions · ${esc(gyms)}</div>
       ${lineChart(pts,"var(--blue)")}</div>`;
   });
   V.innerHTML=h;
 }
 
-/* --- PLANS --- */
 function vPlans(){
   let h=`<div class="disp" style="font-size:28px;font-weight:700">Plans</div>
-  <div class="tiny dim" style="margin:8px 0 14px;line-height:1.5">
-    A programme is a template. A cycle is one run through it with its own log. Finish six weeks, start a new cycle and your history stays.</div>
-  <div class="row" style="margin-bottom:10px"><b style="font-size:14px">Cycles</b><span class="sep"></span></div>`;
+  <div class="card" style="margin-top:12px">
+    <b style="font-size:14px">Current gym</b>
+    <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+      ${Object.keys(DB.gyms).map(g=>`<button class="pill${g===DB.activeGym?" on":""}" data-pickgym="${g}">${esc(gymName(g))}</button>`).join("")}
+    </div>
+    <div class="tiny faint" style="margin-top:8px;line-height:1.5">Every session resolves its exercises to this gym. You can still swap any single exercise inside a session.</div>
+  </div>
+  <div class="row" style="margin:18px 0 10px"><b style="font-size:14px">Cycles</b><span class="sep"></span></div>`;
   DB.cycles.forEach(c=>{
     const p=prog(c.prog), list=sessions(c);
     const done=list.filter(s=>(c.logs[sKey(s.w,s.di)]||{}).done).length;
     h+=`<div class="card" style="${c.id===DB.active?"border-color:var(--green)":""}">
-      <div class="row"><div style="flex:1">
-        <b>${esc(c.name)}</b><div class="tiny faint">${esc(p?p.name:"missing programme")} · started ${fmtD(c.started)} · ${done}/${list.length}</div>
-      </div>${c.id===DB.active?`<span class="chip" style="background:var(--green);color:#101216">ACTIVE</span>`
+      <div class="row"><div style="flex:1"><b>${esc(c.name)}</b>
+        <div class="tiny faint">${esc(p?p.name:"missing programme")} · started ${fmtD(c.started)} · ${done}/${list.length}</div></div>
+      ${c.id===DB.active?`<span class="chip" style="background:var(--green);color:#101216">ACTIVE</span>`
         :`<button class="btn sm" data-setactive="${c.id}">Use</button>`}</div></div>`;
   });
   h+=`<div class="row" style="margin:18px 0 10px"><b style="font-size:14px">Programmes</b><span class="sep"></span></div>`;
   DB.progs.forEach(p=>{
-    h+=`<div class="card"><div class="row"><div style="flex:1">
-      <b>${esc(p.name)}</b><div class="tiny faint">${p.weeks} weeks · ${p.days.length} sessions a week</div></div></div>
+    h+=`<div class="card"><div class="row"><div style="flex:1"><b>${esc(p.name)}</b>
+      <div class="tiny faint">${p.weeks} weeks · ${p.days.length} sessions a week</div></div></div>
       <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
         <button class="btn sm" data-newcycle="${p.id}">Start new cycle</button>
         <button class="btn sm" data-edit="${p.id}">Edit</button>
@@ -566,16 +696,17 @@ function vPlans(){
   V.innerHTML=h;
 }
 
-/* --- EDITOR --- */
 function vEditor(){
   const p=prog(view.pid); if(!p){ go("plans"); return; }
+  const g=DB.activeGym;
   const opts=Object.keys(DB.ex).sort((a,b)=>DB.ex[a].name.localeCompare(DB.ex[b].name));
   let h=`<div class="row"><button class="btn sm" data-go="plans">←</button>
     <div class="disp" style="font-size:24px;font-weight:700">Edit programme</div></div>
-  <div class="card" style="margin-top:12px">
+  <div class="note" style="margin-top:12px">You are editing the ${esc(gymName(g))} setup. Switch gym on the Plans tab to edit the other one. Sets, reps and rest are shared across both.</div>
+  <div class="card">
     <label class="f">Name</label><input data-p="name" value="${esc(p.name)}">
     <label class="f">Weeks</label><input data-p="weeks" inputmode="numeric" value="${p.weeks}">
-    <label class="f">Warm up text</label><input data-p="warmup" value="${esc(p.warmup||"")}">
+    <label class="f">Warm up at ${esc(gymName(g))}</label><input data-p="warmup" value="${esc(warmupFor(p,g))}">
   </div>`;
   p.days.forEach((d,di)=>{
     h+=`<div class="card" style="border-left:4px solid ${d.color}">
@@ -590,13 +721,14 @@ function vEditor(){
           <button class="btn sm" data-delblock="${di}.${bi}" style="border-color:var(--red);color:var(--red)">×</button>
         </div>`;
       b.items.forEach((it,ii)=>{
+        const cur=(it.byGym&&it.byGym[g])||it.ex||opts[0];
         h+=`<div class="row" style="margin-top:6px;gap:6px">
           <select data-d="${di}" data-b="${bi}" data-i="${ii}" data-f="ex" style="flex:2;font-size:12px">
-            ${opts.map(o=>`<option value="${o}"${o===it.ex?" selected":""}>${esc(DB.ex[o].name)}</option>`).join("")}
+            ${opts.map(o=>`<option value="${o}"${o===cur?" selected":""}>${esc(DB.ex[o].name)}</option>`).join("")}
           </select>
-          <input data-d="${di}" data-b="${bi}" data-i="${ii}" data-f="sets" value="${it.sets}" inputmode="numeric" style="width:42px;font-size:12px" title="sets">
-          <input data-d="${di}" data-b="${bi}" data-i="${ii}" data-f="reps" value="${esc(it.reps)}" style="width:48px;font-size:12px" title="reps">
-          <input data-d="${di}" data-b="${bi}" data-i="${ii}" data-f="rest" value="${it.rest}" inputmode="numeric" style="width:50px;font-size:12px" title="rest">
+          <input data-d="${di}" data-b="${bi}" data-i="${ii}" data-f="sets" value="${it.sets}" inputmode="numeric" style="width:42px;font-size:12px">
+          <input data-d="${di}" data-b="${bi}" data-i="${ii}" data-f="reps" value="${esc(it.reps)}" style="width:48px;font-size:12px">
+          <input data-d="${di}" data-b="${bi}" data-i="${ii}" data-f="rest" value="${it.rest}" inputmode="numeric" style="width:50px;font-size:12px">
           <button class="btn sm" data-delitem="${di}.${bi}.${ii}" style="border-color:var(--red);color:var(--red)">×</button>
         </div>`;
       });
@@ -605,17 +737,16 @@ function vEditor(){
     h+=`<button class="btn sm" data-addblock="${di}" style="margin-top:10px">+ block</button></div>`;
   });
   h+=`<button class="btn full" id="addday">+ add a session day</button>
-  <div class="tiny faint" style="margin-top:10px;line-height:1.5">Sets, reps and rest are the three numbers on each row. Editing a programme that already has logged cycles can shift where old sets line up, so for big changes duplicate it instead.</div>`;
+  <div class="tiny faint" style="margin-top:10px;line-height:1.5">Adding or removing exercises shifts where old sets line up. For big changes, duplicate the programme and start a fresh cycle instead.</div>`;
   V.innerHTML=h;
 }
 
-/* --- DATA --- */
 function vData(){
+  const hasBackup=!!localStorage.getItem(BACKUP_KEY);
   V.innerHTML=`<div class="disp" style="font-size:28px;font-weight:700">Data</div>
   <div class="card" style="margin-top:14px">
     <b style="font-size:14px">Export</b>
-    <div class="tiny dim" style="margin:6px 0 10px;line-height:1.5">
-      CSV is one row per set, ready for Sheets. JSON is the full backup including your programmes.</div>
+    <div class="tiny dim" style="margin:6px 0 10px;line-height:1.5">CSV is one row per set with the gym and machine on it. JSON is the full backup including programmes.</div>
     <button class="btn full" id="csv">Download CSV</button>
     <button class="btn full" id="json" style="margin-top:8px">Download JSON backup</button>
   </div>
@@ -624,17 +755,19 @@ function vData(){
     <div class="tiny dim" style="margin:6px 0 10px;line-height:1.5">Replaces everything on this device with the backup file.</div>
     <input type="file" id="imp" accept="application/json">
   </div>
+  ${hasBackup?`<div class="card" style="border-color:var(--green)">
+    <b style="font-size:14px">Pre upgrade snapshot</b>
+    <div class="tiny dim" style="margin:6px 0 10px;line-height:1.5">A copy of your data from just before the two gym upgrade is held on this device.</div>
+    <button class="btn full" id="dlold">Download that snapshot</button>
+  </div>`:""}
   <div class="card">
     <b style="font-size:14px">Alerts</b>
-    <div class="tiny dim" style="margin:6px 0 10px;line-height:1.5">
-      Allow notifications so the rest timer can buzz you when you have flicked to another app.</div>
+    <div class="tiny dim" style="margin:6px 0 10px;line-height:1.5">Allow notifications so the rest timer can buzz you when you have flicked to another app.</div>
     <button class="btn full" id="notif">Enable notifications</button>
   </div>
   <div class="card">
     <b style="font-size:14px">Where your data lives</b>
-    <div class="tiny dim" style="margin-top:6px;line-height:1.6">
-      On this device only, in the browser store for this app. Nothing is sent anywhere. Export a backup now and then,
-      and drop it in Drive from the share sheet. Deleting the app from the home screen can clear it, so keep a recent backup.</div>
+    <div class="tiny dim" style="margin-top:6px;line-height:1.6">On this device only. Nothing is sent anywhere. Always open the app from the home screen icon, since a Safari tab keeps a separate store. Export a backup now and then.</div>
   </div>
   <div class="card">
     <b style="font-size:14px">Danger</b>
@@ -642,14 +775,14 @@ function vData(){
   </div>`;
 }
 
-/* ---------- CSV / JSON ---------- */
+/* ---------- export ---------- */
 function dl(name,text,type){
-  const b=new Blob([text],{type:type||"text/plain"}), u=URL.createObjectURL(b);
+  const b=new Blob([text],{type:type||"text/plain"}),u=URL.createObjectURL(b);
   const a=document.createElement("a"); a.href=u; a.download=name; a.click();
   setTimeout(()=>URL.revokeObjectURL(u),2000);
 }
 function toCSV(){
-  const out=[["cycle","programme","week","day","session_title","date","exercise","set","weight_kg","reps","est_1rm","completed"]];
+  const out=[["cycle","programme","gym","week","day","session_title","date","exercise","set","weight_kg","reps","est_1rm","completed"]];
   DB.cycles.forEach(c=>{
     const p=prog(c.prog); if(!p) return;
     Object.keys(c.logs).forEach(k=>{
@@ -657,79 +790,110 @@ function toCSV(){
       Object.values(l.sets||{}).forEach(s=>{
         const ex=DB.ex[s.ex]||{name:s.ex};
         s.rows.forEach((r,i)=>{ if(!r.w&&!r.r&&!r.d) return;
-          out.push([c.name,p.name,w,"ABCDEFG"[di],d?d.title:"",l.date||"",ex.name,i+1,
-            r.w||"",r.r||"",e1rm(parseFloat(r.w)||0,parseFloat(r.r)||0)||"",r.d?1:0]); });
+          out.push([c.name,p.name,gymName(l.gym||"leisure"),w,"ABCDEFG"[di],d?d.title:"",l.date||"",
+            ex.name,i+1,r.w||"",r.r||"",e1rm(parseFloat(r.w)||0,parseFloat(r.r)||0)||"",r.d?1:0]); });
       });
     });
   });
-  return out.map(r=>r.map(v=>{ const s=String(v);
-    return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; }).join(",")).join("\n");
+  return out.map(r=>r.map(v=>{const s=String(v);
+    return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;}).join(",")).join("\n");
 }
 
 /* ---------- events ---------- */
 document.getElementById("tabs").onclick=e=>{ const b=e.target.closest("button"); if(b) go(b.dataset.tab); };
 
 document.addEventListener("click",e=>{
-  const t=e.target.closest("[data-go],[data-tick],[data-cue],[data-timer],[data-setactive],[data-newcycle],[data-edit],[data-dup],[data-delprog],[data-additem],[data-delitem],[data-addblock],[data-delblock],[data-delday],[data-setlink]");
+  const t=e.target.closest("[data-go],[data-tick],[data-cue],[data-timer],[data-setactive],[data-newcycle],[data-edit],[data-dup],[data-delprog],[data-additem],[data-delitem],[data-addblock],[data-delblock],[data-delday],[data-setlink],[data-gym],[data-pickgym],[data-swap],[data-pick],[data-makedef]");
   if(!t) return;
   const c=cyc();
 
+  if(t.dataset.gym!==undefined){
+    const keys=Object.keys(DB.gyms);
+    DB.activeGym=keys[(keys.indexOf(DB.activeGym)+1)%keys.length];
+    if(view.tab==="session"){ const l=logFor(c,view.w,view.di,true); l.gym=DB.activeGym; }
+    save(true); render(); return;
+  }
+  if(t.dataset.pickgym){ DB.activeGym=t.dataset.pickgym; save(true); render(); return; }
+
   if(t.dataset.go){ if(t.dataset.go==="session") go("session",{w:+t.dataset.w,di:+t.dataset.di}); else go(t.dataset.go); return; }
-
   if(t.dataset.timer){ timerStart(+t.dataset.timer,t.dataset.label,t.dataset.kind); return; }
-
   if(t.dataset.cue){ const b=document.getElementById("cue-"+t.dataset.cue);
     b.style.display=b.style.display==="none"?"block":"none"; return; }
+  if(t.dataset.swap){ const [bi,ii]=t.dataset.swap.split(".").map(Number);
+    const b=document.getElementById("swap-"+slotKey(bi,ii));
+    b.style.display=b.style.display==="none"?"block":"none"; return; }
+
+  if(t.dataset.pick){
+    const [bi,ii,o]=t.dataset.pick.split(".");
+    const slot=slotKey(+bi,+ii), log=logFor(c,view.w,view.di,true);
+    const s=log.sets[slot];
+    if(s&&s.rows.some(r=>r.w||r.d)&&s.ex!==o){
+      if(!confirm("You already have numbers logged in this slot. Move them onto "+((DB.ex[o]||{}).name||o)+"?")) return;
+    }
+    log.over[slot]=o;
+    if(s) s.ex=o;
+    save(true); render(); return;
+  }
+  if(t.dataset.makedef){
+    const [bi,ii]=t.dataset.makedef.split(".").map(Number);
+    const p=prog(c.prog), it=p.days[view.di].blocks[bi].items[ii];
+    const slot=slotKey(bi,ii), log=logFor(c,view.w,view.di,true);
+    const exId=resolveEx(it,slot,log);
+    it.byGym=it.byGym||{}; it.byGym[DB.activeGym]=exId;
+    if(!(it.opts||[]).includes(exId)) (it.opts=it.opts||[]).push(exId);
+    delete log.over[slot];
+    save(true); render(); return;
+  }
 
   if(t.dataset.tick!==undefined){
-    const key=t.dataset.tick, i=+t.dataset.i, log=logFor(c,view.w,view.di,true);
-    const s=log.sets[key]; s.rows[i].d=!s.rows[i].d;
+    const slot=t.dataset.tick, i=+t.dataset.i, log=logFor(c,view.w,view.di,true);
+    const s=log.sets[slot]; s.rows[i].d=!s.rows[i].d;
     const d=prog(c.prog).days[view.di];
     t.classList.toggle("on",s.rows[i].d);
     t.style.background=s.rows[i].d?d.color:"transparent";
     t.style.borderColor=s.rows[i].d?d.color:"var(--line)";
-    const done=s.rows.filter(r=>r.d).length;
-    document.getElementById("cnt-"+key).textContent=done+"/"+s.rows.length;
-    document.getElementById("cnt-"+key).style.color=done===s.rows.length?"var(--green)":"var(--faint)";
+    const done=s.rows.filter(r=>r.d).length, cnt=document.getElementById("cnt-"+slot);
+    cnt.textContent=done+"/"+s.rows.length;
+    cnt.style.color=done===s.rows.length?"var(--green)":"var(--faint)";
     let tot=0,don=0; d.blocks.forEach((b,bi)=>b.items.forEach((it,ii)=>{ tot+=it.sets;
-      const r=log.sets[iKey(bi,ii,it.ex)]; don+=r?r.rows.filter(x=>x.d).length:0; }));
+      const r=log.sets[slotKey(bi,ii)]; don+=r?r.rows.filter(x=>x.d).length:0; }));
     document.getElementById("setcount").textContent=don+"/"+tot+" sets";
     document.getElementById("sbar").style.width=(tot?don/tot*100:0)+"%";
-    if(!log.date) { log.date=todayISO(); const di=document.getElementById("sdate"); if(di) di.value=log.date; }
-    if(s.rows[i].d && +t.dataset.rest>0) timerStart(+t.dataset.rest, t.dataset.ex+", set "+(i+1)+" done","REST");
+    if(!log.date){ log.date=todayISO(); const di=document.getElementById("sdate"); if(di) di.value=log.date; }
+    if(!log.gym) log.gym=DB.activeGym;
+    if(s.rows[i].d&&+t.dataset.rest>0) timerStart(+t.dataset.rest,t.dataset.ex+", set "+(i+1)+" done","REST");
     save(); return;
   }
 
   if(t.dataset.setlink){ const id=t.dataset.setlink;
-    const v=prompt("Link for "+DB.ex[id].name+" (leave blank to reset)", DB.ex[id].link||"");
-    if(v!==null){ DB.ex[id].link=v.trim(); save(); render(); } return; }
+    const v=prompt("Link for "+DB.ex[id].name+" (blank to reset)",DB.ex[id].link||"");
+    if(v!==null){ DB.ex[id].link=v.trim(); save(true); render(); } return; }
 
-  if(t.dataset.setactive){ DB.active=t.dataset.setactive; save(); go("home"); return; }
-
+  if(t.dataset.setactive){ DB.active=t.dataset.setactive; save(true); go("home"); return; }
   if(t.dataset.newcycle){
-    const p=prog(t.dataset.newcycle);
-    const n=DB.cycles.filter(x=>x.prog===p.id).length+1;
-    const c2={id:uid("c_"),prog:p.id,name:prompt("Name this cycle","Cycle "+n)||("Cycle "+n),
-      started:todayISO(),logs:{}};
-    DB.cycles.push(c2); DB.active=c2.id; save(); go("home"); return;
+    const p=prog(t.dataset.newcycle), n=DB.cycles.filter(x=>x.prog===p.id).length+1;
+    const c2={id:uid("c_"),prog:p.id,name:prompt("Name this cycle","Cycle "+n)||("Cycle "+n),started:todayISO(),logs:{}};
+    DB.cycles.push(c2); DB.active=c2.id; save(true); go("home"); return;
   }
   if(t.dataset.edit){ go("editor",{pid:t.dataset.edit}); return; }
   if(t.dataset.dup){ const p=JSON.parse(JSON.stringify(prog(t.dataset.dup)));
-    p.id=uid("p_"); p.name=p.name+" copy"; DB.progs.push(p); save(); go("editor",{pid:p.id}); return; }
+    p.id=uid("p_"); p.name=p.name+" copy"; DB.progs.push(p); save(true); go("editor",{pid:p.id}); return; }
   if(t.dataset.delprog){ if(!confirm("Delete this programme? Logged cycles stay but lose their template.")) return;
-    DB.progs=DB.progs.filter(p=>p.id!==t.dataset.delprog); save(); render(); return; }
+    DB.progs=DB.progs.filter(p=>p.id!==t.dataset.delprog); save(true); render(); return; }
 
   const P=prog(view.pid);
   if(t.dataset.additem){ const [di,bi]=t.dataset.additem.split(".").map(Number);
-    P.days[di].blocks[bi].items.push({ex:Object.keys(DB.ex)[0],sets:3,reps:"10",tempo:"3010",rest:60}); save(); render(); return; }
+    const first=Object.keys(DB.ex)[0];
+    P.days[di].blocks[bi].items.push({byGym:{leisure:first,office:first},sets:3,reps:"10",tempo:"3010",rest:60,opts:[first]});
+    save(true); render(); return; }
   if(t.dataset.delitem){ const [di,bi,ii]=t.dataset.delitem.split(".").map(Number);
-    P.days[di].blocks[bi].items.splice(ii,1); save(); render(); return; }
+    P.days[di].blocks[bi].items.splice(ii,1); save(true); render(); return; }
   if(t.dataset.addblock){ const di=+t.dataset.addblock;
-    P.days[di].blocks.push({label:(P.days[di].blocks.length+1)+" · block",mins:6,notes:[],items:[]}); save(); render(); return; }
+    P.days[di].blocks.push({label:(P.days[di].blocks.length+1)+" · block",mins:6,notes:[],items:[]}); save(true); render(); return; }
   if(t.dataset.delblock){ const [di,bi]=t.dataset.delblock.split(".").map(Number);
-    P.days[di].blocks.splice(bi,1); save(); render(); return; }
+    P.days[di].blocks.splice(bi,1); save(true); render(); return; }
   if(t.dataset.delday){ if(!confirm("Remove this day?")) return;
-    P.days.splice(+t.dataset.delday,1); save(); render(); return; }
+    P.days.splice(+t.dataset.delday,1); save(true); render(); return; }
 });
 
 document.addEventListener("input",e=>{
@@ -738,58 +902,70 @@ document.addEventListener("input",e=>{
     log.sets[t.dataset.key].rows[+t.dataset.i][t.dataset.in]=t.value; save(); return; }
   if(t.id==="sdate"){ logFor(cyc(),view.w,view.di,true).date=t.value; save(); return; }
 });
+
 document.addEventListener("change",e=>{
-  const t=e.target, P=prog(view.pid);
-  if(t.dataset.p && P){ P[t.dataset.p]= t.dataset.p==="weeks" ? Math.max(1,Math.min(52,+t.value||1)) : t.value; save(); return; }
-  if(P && t.dataset.d!==undefined){
-    const d=P.days[+t.dataset.d];
-    if(t.dataset.b===undefined){ d[t.dataset.f]=t.value; }
-    else { const b=d.blocks[+t.dataset.b];
-      if(t.dataset.i===undefined) b[t.dataset.f]= t.dataset.f==="mins" ? (+t.value||0) : t.value;
-      else { const it=b.items[+t.dataset.i];
-        it[t.dataset.f]= (t.dataset.f==="sets"||t.dataset.f==="rest") ? (+t.value||0) : t.value; } }
-    save(); return;
+  const t=e.target, P=prog(view.pid), g=DB.activeGym;
+  if(t.dataset.p&&P){
+    if(t.dataset.p==="weeks") P.weeks=Math.max(1,Math.min(52,+t.value||1));
+    else if(t.dataset.p==="warmup"){ if(typeof P.warmup==="string") P.warmup={leisure:P.warmup,office:P.warmup};
+      P.warmup[g]=t.value; }
+    else P[t.dataset.p]=t.value;
+    save(true); return;
   }
-  if(t.id==="imp" && t.files[0]){ const fr=new FileReader();
+  if(P&&t.dataset.d!==undefined){
+    const d=P.days[+t.dataset.d];
+    if(t.dataset.b===undefined) d[t.dataset.f]=t.value;
+    else { const b=d.blocks[+t.dataset.b];
+      if(t.dataset.i===undefined) b[t.dataset.f]=t.dataset.f==="mins"?(+t.value||0):t.value;
+      else { const it=b.items[+t.dataset.i];
+        if(t.dataset.f==="ex"){ it.byGym=it.byGym||{}; it.byGym[g]=t.value;
+          it.opts=it.opts||[]; if(!it.opts.includes(t.value)) it.opts.push(t.value); }
+        else it[t.dataset.f]=(t.dataset.f==="sets"||t.dataset.f==="rest")?(+t.value||0):t.value; } }
+    save(true); return;
+  }
+  if(t.id==="imp"&&t.files[0]){ const fr=new FileReader();
     fr.onload=()=>{ try{ const o=JSON.parse(fr.result);
       if(!o.cycles||!o.progs) throw 0;
       if(!confirm("Replace all data on this device with this backup?")) return;
-      DB=o; save(); go("home"); }catch(err){ alert("That does not look like an Iron Log backup."); } };
+      DB=o.v>=2?o:migrate(JSON.stringify(o)); save(true); go("home");
+    }catch(err){ alert("That does not look like an Iron Log backup."); } };
     fr.readAsText(t.files[0]); }
 });
 
 document.addEventListener("click",e=>{
   const id=e.target.id;
   if(id==="finish"){ const c=cyc(), log=logFor(c,view.w,view.di,true);
-    log.done=!log.done; if(log.done&&!log.date) log.date=todayISO();
-    save(); if(log.done){ timerStop(); wakeOff(); go("home"); } else render(); }
+    log.done=!log.done; if(log.done){ if(!log.date) log.date=todayISO(); if(!log.gym) log.gym=DB.activeGym; }
+    save(true); if(log.done){ timerStop(); wakeOff(); go("home"); } else render(); }
   if(id==="csv") dl("ironlog-"+todayISO()+".csv",toCSV(),"text/csv");
   if(id==="json") dl("ironlog-backup-"+todayISO()+".json",JSON.stringify(DB),"application/json");
+  if(id==="dlold") dl("ironlog-pre-v2-"+todayISO()+".json",localStorage.getItem(BACKUP_KEY)||"{}","application/json");
   if(id==="notif"){ if(window.Notification) Notification.requestPermission().then(p=>
     alert(p==="granted"?"Notifications on.":"Not enabled. The alarm sound still plays.")); }
   if(id==="wipe"){ if(confirm("Erase everything on this device? Export a backup first.")){
-    localStorage.removeItem(KEY); DB=seed(); save(); go("home"); } }
+    localStorage.removeItem(KEY); DB=seed(); save(true); go("home"); } }
   if(id==="newprog"){ const name=prompt("Programme name","New programme"); if(!name) return;
-    const p={id:uid("p_"),name,weeks:6,warmup:WARMUP,days:[{title:"Day A",color:"var(--blue)",focus:"",
-      blocks:[{label:"1 · main lift",mins:8,notes:["bigthree"],items:[]}]}]};
-    DB.progs.push(p); save(); go("editor",{pid:p.id}); }
-  if(id==="addday"){ const P=prog(view.pid);
-    const cols=["var(--blue)","var(--red)","var(--yellow)","var(--green)"];
+    const first=Object.keys(DB.ex)[0];
+    const p={id:uid("p_"),name,weeks:6,warmup:{leisure:WARMUP.leisure,office:WARMUP.office},
+      days:[{title:"Day A",color:"var(--blue)",focus:"",blocks:[{label:"1 · main lift",mins:8,notes:["bigthree"],items:[]}]}]};
+    DB.progs.push(p); save(true); go("editor",{pid:p.id}); }
+  if(id==="addday"){ const P=prog(view.pid), cols=["var(--blue)","var(--red)","var(--yellow)","var(--green)"];
     P.days.push({title:"Day "+"ABCDEFG"[P.days.length],color:cols[P.days.length%4],focus:"",
-      blocks:[{label:"1 · main lift",mins:8,notes:[],items:[]}]}); save(); render(); }
+      blocks:[{label:"1 · main lift",mins:8,notes:[],items:[]}]}); save(true); render(); }
   if(id==="addex"){ const n=document.getElementById("nx_name").value.trim(); if(!n) return;
     DB.ex[uid("x_")]={name:n,kit:document.getElementById("nx_kit").value.trim(),
       cue:document.getElementById("nx_cue").value.trim(),alt:document.getElementById("nx_alt").value.trim(),link:""};
-    save(); render(); }
+    save(true); render(); }
 });
 
-/* unlock audio on first touch so the timer can sound later */
 document.addEventListener("touchstart",function once(){ hush.play().then(()=>hush.pause()).catch(()=>{});
   document.removeEventListener("touchstart",once); },{once:true});
 
 if("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(()=>{});
 
-load(); timerRestore(); render();
+load();
+try{ const r=localStorage.getItem(TK); if(r){ T=JSON.parse(r); if(T.ends<=now()) timerStop(); else hush.play().catch(()=>{}); } }catch(e){}
+render();
 </script>
 </body>
 </html>
