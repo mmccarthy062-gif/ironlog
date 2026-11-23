@@ -22,7 +22,11 @@
 html,body{margin:0;background:var(--bg);color:var(--text);
   font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif;overscroll-behavior-y:contain}
 body{padding-bottom:calc(150px + env(safe-area-inset-bottom))}
-#view{max-width:620px;margin:0 auto;padding:18px 14px calc(18px + env(safe-area-inset-top))}
+#view{max-width:620px;margin:0 auto;
+  padding-top:calc(20px + env(safe-area-inset-top));
+  padding-bottom:20px;
+  padding-left:calc(14px + env(safe-area-inset-left));
+  padding-right:calc(14px + env(safe-area-inset-right))}
 h1,h2,h3{margin:0}
 .disp{font-family:var(--disp);text-transform:uppercase;letter-spacing:.02em}
 .mono{font-family:var(--mono)}
